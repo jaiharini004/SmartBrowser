@@ -22,6 +22,7 @@ from src.agent.browser_use.browser_use_agent import BrowserUseAgent
 from src.browser.custom_browser import CustomBrowser
 from src.controller.custom_controller import CustomController
 from src.utils import llm_provider
+from src.utils.memory_manager import MemoryManager
 from src.webui.webui_manager import WebuiManager
 
 logger = logging.getLogger(__name__)
@@ -328,8 +329,16 @@ async def run_agent_task(
         comp = webui_manager.id_to_component.get(f"agent_settings.{key}")
         return components.get(comp, default) if comp else default
 
+    # Memory injection
+    memory_manager = MemoryManager()
+    memory_context = memory_manager.get_memory_context()
+
+
     override_system_prompt = get_setting("override_system_prompt") or None
-    extend_system_prompt = get_setting("extend_system_prompt") or None
+    extend_system_prompt = get_setting("extend_system_prompt") or ""
+    if memory_context:
+        extend_system_prompt += "\n" + memory_context
+    extend_system_prompt = extend_system_prompt if extend_system_prompt else None
     llm_provider_name = get_setting(
         "llm_provider", None
     )  # Default to None if not found
@@ -533,6 +542,8 @@ async def run_agent_task(
 
         def done_callback_wrapper(history: AgentHistoryList):
             _handle_done(webui_manager, history)
+            # Add to persistent memory database once agent finishes
+            memory_manager.add_memory(task, str(history.final_result()))
 
         if not webui_manager.bu_agent:
             logger.info(f"Initializing new agent for task: {task}")
