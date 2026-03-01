@@ -1,4 +1,4 @@
-# 🧠 SmartBrowser
+#  SmartBrowser
 
 **AI-powered browser automation with multi-model intelligence.**
 
@@ -6,7 +6,7 @@ SmartBrowser is an intelligent browser agent that uses LLMs to autonomously navi
 
 ---
 
-## ✨ Features
+##  Features
 
 - **Multi-Model Support** — Seamlessly switch between **Groq** (Llama 3.3, Llama 4, Qwen 3), **OpenRouter** (Gemini Flash, DeepSeek R1), OpenAI, Anthropic, Google, DeepSeek, Ollama, and more
 - **Browser Agent** — AI navigates real websites, fills forms, clicks buttons, and extracts data
@@ -17,7 +17,7 @@ SmartBrowser is an intelligent browser agent that uses LLMs to autonomously navi
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Clone & Setup
 ```bash
@@ -64,7 +64,7 @@ Open **http://127.0.0.1:7788** in your browser.
 
 ---
 
-## 🎯 Usage Guide
+##  Usage Guide
 
 ### Browser Agent
 1. Go to **⚙️ Agent Settings** → Select **Groq** as provider → Choose a model (e.g. `llama-3.3-70b-versatile`)
@@ -78,7 +78,7 @@ Open **http://127.0.0.1:7788** in your browser.
 
 ---
 
-## 🔧 Configuration
+##  Configuration
 
 | Setting | Description | Default |
 |---------|-------------|---------|
@@ -90,7 +90,7 @@ Open **http://127.0.0.1:7788** in your browser.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 SmartBrowser/
@@ -111,6 +111,6 @@ SmartBrowser/
 
 ---
 
-## 📝 License
+##  License
 
 This project is for personal and educational use.
