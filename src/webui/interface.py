@@ -296,26 +296,26 @@ def create_ui(theme_name="Default"):
         with gr.Row():
             gr.Markdown(
                 """
-                # 🧠 SmartBrowser
+                #  SmartBrowser
                 ### AI-powered browser automation with multi-model intelligence
                 """,
                 elem_classes=["header-text"],
             )
 
         with gr.Tabs() as tabs:
-            with gr.TabItem("⚙️ Agent Settings"):
+            with gr.TabItem(" Agent Settings"):
                 create_agent_settings_tab(ui_manager)
 
-            with gr.TabItem("🌐 Browser Settings"):
+            with gr.TabItem(" Browser Settings"):
                 create_browser_settings_tab(ui_manager)
 
-            with gr.TabItem("🤖 Run Agent"):
+            with gr.TabItem(" Run Agent"):
                 create_browser_use_agent_tab(ui_manager)
 
-            with gr.TabItem("🔬 Deep Research"):
+            with gr.TabItem(" Deep Research"):
                 create_deep_research_agent_tab(ui_manager)
 
-            with gr.TabItem("📁 Load & Save Config"):
+            with gr.TabItem(" Load & Save Config"):
                 create_load_save_config_tab(ui_manager)
 
     return demo

@@ -97,6 +97,21 @@ class BrowserUseAgent(Agent):
                 if on_step_start is not None:
                     await on_step_start(self)
 
+                # Heuristic checks & Auto-healing
+                try:
+                    page = await self.browser_context.get_current_page()
+                    title = await page.title()
+                    if any(blocked in title for blocked in ["Just a moment", "Attention Required", "Access Denied", "Security check"]):
+                        logger.warning(f"🚨 Cloudflare/Bot protection detected! Title: {title}. Auto-healing: pausing 5 seconds.")
+                        await asyncio.sleep(5)
+
+                    if self.state.consecutive_failures >= 2 and self.state.consecutive_failures < self.settings.max_failures:
+                        logger.warning(f"Auto-healing: Detected {self.state.consecutive_failures} failures. Refreshing page...")
+                        await page.reload()
+                        await asyncio.sleep(2)
+                except Exception as e:
+                    logger.debug(f"Auto-healing checks skipped: {e}")
+
                 step_info = AgentStepInfo(step_number=step, max_steps=max_steps)
                 await self.step(step_info)
 
