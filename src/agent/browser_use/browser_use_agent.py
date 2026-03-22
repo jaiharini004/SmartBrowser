@@ -79,6 +79,13 @@ class BrowserUseAgent(Agent):
                     signal_handler.wait_for_resume()
                     signal_handler.reset()
 
+                # If there were recent failures, wait with backoff before retrying
+                # This helps with rate-limited providers like Groq
+                if self.state.consecutive_failures > 0:
+                    backoff_time = min(10 * self.state.consecutive_failures, 30)
+                    logger.info(f'⏳ Rate limit backoff: waiting {backoff_time}s before retry (failure {self.state.consecutive_failures}/{self.settings.max_failures})')
+                    await asyncio.sleep(backoff_time)
+
                 # Check if we should stop due to too many failures
                 if self.state.consecutive_failures >= self.settings.max_failures:
                     logger.error(f'❌ Stopping due to {self.settings.max_failures} consecutive failures')

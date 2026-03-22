@@ -18,13 +18,14 @@ model_names = {
     "groq": [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
+        "llama3-8b-8192",
+        "mixtral-8x7b-32768",
         "meta-llama/llama-4-maverick-17b-128e-instruct",
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "qwen/qwen3-32b",
         "moonshotai/kimi-k2-instruct",
         "groq/compound",
         "groq/compound-mini",
-        "llama-3.1-7b-versatile",
     ],
     "openrouter": [
         "google/gemini-flash-1.5",

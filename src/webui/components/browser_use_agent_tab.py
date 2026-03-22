@@ -4,6 +4,7 @@ import logging
 import os
 import uuid
 from typing import Any, AsyncGenerator, Dict, Optional
+from urllib.parse import urlparse
 
 import gradio as gr
 
@@ -26,6 +27,11 @@ from src.utils.memory_manager import MemoryManager
 from src.webui.webui_manager import WebuiManager
 
 logger = logging.getLogger(__name__)
+
+_SITE_DESCRIPTION_OVERRIDES: Dict[str, str] = {
+    "pinterest.com": "Pinterest is a visual discovery platform used to explore and save ideas through image pins, boards, and curated collections.",
+    "www.pinterest.com": "Pinterest is a visual discovery platform used to explore and save ideas through image pins, boards, and curated collections.",
+}
 
 
 # --- Helper Functions --- (Defined at module level)
@@ -65,6 +71,62 @@ async def _initialize_llm(
             f"Failed to initialize LLM '{model_name}' for provider '{provider}'. Please check settings. Error: {e}"
         )
         return None
+
+
+async def _initialize_llm_with_fallback(
+        provider: Optional[str],
+        model_name: Optional[str],
+        temperature: float,
+        base_url: Optional[str],
+        api_key: Optional[str],
+        num_ctx: Optional[int] = None,
+) -> Optional[BaseChatModel]:
+    """Initialize an LLM and try provider-specific fallback model names when needed."""
+    if not provider:
+        return None
+
+    normalized_provider = provider.strip().lower()
+    candidate_models: list[str] = []
+
+    if model_name:
+        candidate_models.append(model_name)
+
+    if normalized_provider == "groq":
+        groq_fallbacks = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768"
+        ]
+        for fallback_model in groq_fallbacks:
+            if fallback_model not in candidate_models:
+                candidate_models.append(fallback_model)
+
+    if not candidate_models:
+        return None
+
+    last_error_model = candidate_models[-1]
+    for candidate_model in candidate_models:
+        llm = await _initialize_llm(
+            provider=provider,
+            model_name=candidate_model,
+            temperature=temperature,
+            base_url=base_url,
+            api_key=api_key,
+            num_ctx=num_ctx,
+        )
+        if llm is not None:
+            if candidate_model != model_name:
+                logger.warning(
+                    f"LLM model fallback activated for provider '{provider}': '{model_name}' -> '{candidate_model}'"
+                )
+            return llm
+        last_error_model = candidate_model
+
+    logger.error(
+        f"All fallback models failed for provider '{provider}'. Last attempted model: '{last_error_model}'"
+    )
+    return None
 
 
 def _get_config_value(
@@ -127,6 +189,52 @@ def _format_agent_output(model_output: AgentOutput) -> str:
             content = f"<pre><code>Error formatting agent output.\nRaw output:\n{str(model_output)}</code></pre>"
 
     return content.strip()
+
+
+def _extract_last_public_page(history: AgentHistoryList) -> tuple[Optional[str], Optional[str]]:
+    """Return the last non-internal page URL/title from agent history."""
+    try:
+        history_items = getattr(history, "history", None) or []
+        for entry in reversed(history_items):
+            state = getattr(entry, "state", None)
+            if state is None:
+                continue
+            page_url = (getattr(state, "url", "") or "").strip()
+            page_title = (getattr(state, "title", "") or "").strip()
+            if not page_url:
+                continue
+            if page_url.startswith("about:") or page_url.startswith("chrome:") or page_url.startswith("edge:"):
+                continue
+            return page_url, page_title
+    except Exception as exc:
+        logger.debug(f"Could not extract last public page from history: {exc}")
+    return None, None
+
+
+def _build_site_description(page_url: Optional[str], page_title: Optional[str], task: Optional[str]) -> str:
+    """Build a concise site/topic description for what was opened or searched."""
+    if not page_url:
+        if task:
+            return f"I could not detect a final public page URL, but your request was: {task[:180]}"
+        return "I could not detect a final public page URL to describe."
+
+    parsed = urlparse(page_url)
+    host = (parsed.netloc or "").lower()
+    normalized_host = host[4:] if host.startswith("www.") else host
+    display_name = normalized_host.split(".")[0].capitalize() if normalized_host else "Website"
+
+    if host in _SITE_DESCRIPTION_OVERRIDES:
+        summary = _SITE_DESCRIPTION_OVERRIDES[host]
+    elif normalized_host in _SITE_DESCRIPTION_OVERRIDES:
+        summary = _SITE_DESCRIPTION_OVERRIDES[normalized_host]
+    else:
+        if page_title:
+            summary = f"{display_name} appears to be related to: {page_title}."
+        else:
+            summary = f"{display_name} is the website opened for your request."
+
+    title_part = f"Title: {page_title}\n" if page_title else ""
+    return f"**Site Description**\n- URL: {page_url}\n- {title_part}- Summary: {summary}"
 
 
 # --- Updated Callback Implementation ---
@@ -198,7 +306,7 @@ async def _handle_new_step(
     await asyncio.sleep(0.05)
 
 
-def _handle_done(webui_manager: WebuiManager, history: AgentHistoryList):
+def _handle_done(webui_manager: WebuiManager, history: AgentHistoryList, task: Optional[str] = None):
     """Callback when the agent finishes the task (success or failure)."""
     logger.info(
         f"Agent task finished. Duration: {history.total_duration_seconds():.2f}s, Tokens: {history.total_input_tokens()}"
@@ -219,6 +327,12 @@ def _handle_done(webui_manager: WebuiManager, history: AgentHistoryList):
 
     webui_manager.bu_chat_history.append(
         {"role": "assistant", "content": final_summary}
+    )
+
+    page_url, page_title = _extract_last_public_page(history)
+    description_message = _build_site_description(page_url, page_title, task)
+    webui_manager.bu_chat_history.append(
+        {"role": "assistant", "content": description_message}
     )
 
 
@@ -434,7 +548,7 @@ async def run_agent_task(
         os.makedirs(save_download_path, exist_ok=True)
 
     # --- 2. Initialize LLM ---
-    main_llm = await _initialize_llm(
+    main_llm = await _initialize_llm_with_fallback(
         llm_provider_name,
         llm_model_name,
         llm_temperature,
@@ -442,6 +556,17 @@ async def run_agent_task(
         llm_api_key,
         ollama_num_ctx if llm_provider_name == "ollama" else None,
     )
+    if main_llm is None:
+        gr.Error("Failed to initialize LLM with all fallback models. Please verify provider, model name, and API key.")
+        yield {
+            user_input_comp: gr.update(interactive=True, placeholder="LLM initialization failed. Update settings and retry."),
+            run_button_comp: gr.update(value="▶️ Submit Task", interactive=True),
+            stop_button_comp: gr.update(value="⏹️ Stop", interactive=False),
+            pause_resume_button_comp: gr.update(value="⏸️ Pause", interactive=False),
+            clear_button_comp: gr.update(interactive=True),
+            chatbot_comp: gr.update(value=webui_manager.bu_chat_history),
+        }
+        return
 
     # Pass the webui_manager instance to the callback when wrapping it
     async def ask_callback_wrapper(
@@ -541,7 +666,7 @@ async def run_agent_task(
             await _handle_new_step(webui_manager, state, output, step_num)
 
         def done_callback_wrapper(history: AgentHistoryList):
-            _handle_done(webui_manager, history)
+            _handle_done(webui_manager, history, task)
             # Add to persistent memory database once agent finishes
             memory_manager.add_memory(task, str(history.final_result()))
 
@@ -725,6 +850,117 @@ async def run_agent_task(
             elif agent_task.exception():  # Check if task finished with exception
                 agent_task.result()  # Raise the exception to be caught below
             logger.info("Agent task completed processing.")
+
+            # --- Generate Site/Topic Description ---
+            # After the agent finishes, scrape the current page and ask the LLM
+            # to generate a description of the website/topic the user searched for.
+            try:
+                if webui_manager.bu_browser_context and main_llm:
+                    logger.info("📋 Attempting to generate site/topic description...")
+
+                    # Get the current page the agent was working on
+                    current_page = None
+                    try:
+                        current_page = await webui_manager.bu_browser_context.get_current_page()
+                    except Exception as page_err:
+                        logger.warning(f"📋 Could not get current page: {page_err}")
+
+                    if current_page and not current_page.is_closed():
+                        page_url = current_page.url or ""
+                        logger.info(f"📋 Current page URL: {page_url}")
+
+                        try:
+                            page_title = await current_page.title()
+                        except Exception:
+                            page_title = ""
+
+                        # Skip description for blank/internal pages
+                        if page_url and not page_url.startswith(("about:", "chrome://", "chrome-extension://")):
+                            # Scrape the visible content from the page
+                            page_content = ""
+                            try:
+                                await current_page.wait_for_load_state("domcontentloaded", timeout=5000)
+                                page_content = await current_page.evaluate("""
+                                    () => {
+                                        const remove = document.querySelectorAll(
+                                            'script, style, nav, footer, aside, .sidebar, .menu, .ad, .cookie-banner, iframe'
+                                        );
+                                        remove.forEach(el => el.remove());
+                                        const main = document.querySelector(
+                                            'main, article, .content, #content, .post-content, [role="main"]'
+                                        );
+                                        const target = main || document.body;
+                                        let text = target.innerText || '';
+                                        text = text.replace(/\\n{3,}/g, '\\n\\n').trim();
+                                        return text.substring(0, 3000);
+                                    }
+                                """)
+                                logger.info(f"📋 Scraped {len(page_content)} chars from page")
+                            except Exception as scrape_err:
+                                logger.warning(f"📋 Page scrape failed: {scrape_err}")
+                                page_content = ""
+
+                            if page_title or page_content:
+                                from langchain_core.messages import (
+                                    HumanMessage as DescHumanMessage,
+                                    SystemMessage as DescSystemMessage,
+                                )
+
+                                desc_system = (
+                                    "You are a knowledgeable assistant. The user browsed a website "
+                                    "using the SmartBrowser agent. Based on the page title, URL, "
+                                    "and page content provided, write a clear and concise description "
+                                    "of this website/topic.\n\n"
+                                    "RULES:\n"
+                                    "1. Start with a one-line bold summary of what the site/topic is\n"
+                                    "2. Include 3-5 key points as bullet points\n"
+                                    "3. Mention what the site is used for or known for\n"
+                                    "4. Keep it under 150 words\n"
+                                    "5. Use Markdown formatting\n"
+                                    "6. Do NOT include the URL in the description"
+                                )
+
+                                desc_prompt = (
+                                    f"Page Title: {page_title}\n"
+                                    f"URL: {page_url}\n\n"
+                                    f"Page Content (excerpt):\n{page_content[:2000]}"
+                                )
+
+                                # Wait before LLM call if using rate-limited providers
+                                if llm_provider_name in ("groq", "openrouter", "grok"):
+                                    logger.info("📋 Waiting 10s for rate limit cooldown before description...")
+                                    await asyncio.sleep(10)
+
+                                try:
+                                    desc_response = await main_llm.ainvoke([
+                                        DescSystemMessage(content=desc_system),
+                                        DescHumanMessage(content=desc_prompt),
+                                    ])
+                                    description_text = desc_response.content.strip()
+
+                                    if description_text:
+                                        desc_message = (
+                                            f"📋 **Site Description**\n\n"
+                                            f"{description_text}"
+                                        )
+                                        webui_manager.bu_chat_history.append(
+                                            {"role": "assistant", "content": desc_message}
+                                        )
+                                        logger.info("📋 Site description generated successfully.")
+                                    else:
+                                        logger.warning("📋 LLM returned empty description.")
+                                except Exception as llm_err:
+                                    logger.warning(f"📋 LLM description generation failed: {llm_err}")
+                            else:
+                                logger.info("📋 No page title or content available, skipping description.")
+                        else:
+                            logger.info(f"📋 Skipping description for internal page: {page_url}")
+                    else:
+                        logger.info("📋 No active page available, skipping description.")
+                else:
+                    logger.info("📋 Browser context or LLM not available, skipping description.")
+            except Exception as desc_err:
+                logger.warning(f"📋 Description generation error: {desc_err}")
 
             logger.info(f"Explicitly saving agent history to: {history_file}")
             webui_manager.bu_agent.save_history(history_file)
@@ -992,12 +1228,11 @@ async def handle_clear(webui_manager: WebuiManager):
     }
 
 
-# --- Tab Creation Function ---
-
 
 def create_browser_use_agent_tab(webui_manager: WebuiManager):
     """
     Create the run agent tab, defining UI, state, and handlers.
+    Features a ChatGPT-style input pill with multimodal support.
     """
     webui_manager.init_browser_use_agent()
 
@@ -1012,14 +1247,57 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
             height=600,
             show_copy_button=True,
         )
-        user_input = gr.Textbox(
-            label="Your Task or Response",
-            placeholder="Enter your task here or provide assistance when asked.",
-            lines=3,
-            interactive=True,
-            elem_id="user_input",
+
+        # Image preview (shown when user uploads an image)
+        image_preview = gr.Image(
+            label="Uploaded Image",
+            elem_id="image-preview-box",
+            visible=False,
+            interactive=False,
+            type="filepath",
+            height=60,
         )
-        with gr.Row():
+
+        # Hidden state to carry image data for VLM
+        image_data_state = gr.State(value=None)
+
+        # ======== ChatGPT-Style Input Pill ========
+        with gr.Row(elem_id="chatgpt-input-pill"):
+            # The '+' Upload Button (opens native file picker)
+            multimodal_upload = gr.UploadButton(
+                "＋",
+                file_types=["image", ".pdf", ".txt"],
+                file_count="single",
+                elem_id="chat-plus-btn",
+            )
+
+            # The main borderless text input
+            user_input = gr.Textbox(
+                show_label=False,
+                placeholder="Ask anything",
+                lines=1,
+                interactive=True,
+                elem_id="chat-text-box",
+                container=False,
+            )
+
+            # The Voice Mic Button (just a styled button)
+            mic_button = gr.Button("🎤", elem_id="chat-mic-btn")
+
+            # The White Circular Submit Button
+            run_button = gr.Button("➤", elem_id="chat-send-btn")
+
+        # ======== Hidden Audio Recorder (toggled by mic button) ========
+        voice_input = gr.Audio(
+            sources=["microphone"],
+            type="filepath",
+            show_label=False,
+            elem_id="voice-recorder",
+            visible=False,
+        )
+
+        # ======== Control Buttons Below the Pill ========
+        with gr.Row(elem_id="agent-control-row"):
             stop_button = gr.Button(
                 "⏹️ Stop", interactive=False, variant="stop", scale=2
             )
@@ -1029,7 +1307,6 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
             clear_button = gr.Button(
                 "🗑️ Clear", interactive=True, variant="secondary", scale=2
             )
-            run_button = gr.Button("▶️ Submit Task", variant="primary", scale=3)
 
         browser_view = gr.HTML(
             value="<div style='width:100%; height:50vh; display:flex; justify-content:center; align-items:center; border:1px solid #ccc; background-color:#f0f0f0;'><p>Browser View (Requires Headless=True)</p></div>",
@@ -1059,6 +1336,11 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
             agent_history_file=agent_history_file,
             recording_gif=recording_gif,
             browser_view=browser_view,
+            multimodal_upload=multimodal_upload,
+            mic_button=mic_button,
+            voice_input=voice_input,
+            image_preview=image_preview,
+            image_data_state=image_data_state,
         )
     )
     webui_manager.add_components(
@@ -1070,6 +1352,85 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
     )  # Get all components known to manager
     run_tab_outputs = list(tab_components.values())
 
+    # --- Multimodal Handlers ---
+
+    def handle_mic_click():
+        """Toggle the hidden audio recorder visible so user can record."""
+        return gr.update(visible=True)
+
+    async def handle_voice_input(audio_filepath):
+        """Transcribe voice audio using Groq Whisper STT, fill textbox, hide recorder."""
+        if not audio_filepath:
+            return gr.update(), gr.update(visible=False)  # Hide recorder, no text change
+
+        logger.info(f"🎤 Voice input received: {audio_filepath}")
+        try:
+            groq_key = os.environ.get("GROQ_API_KEY", "")
+            if groq_key:
+                import httpx
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    with open(audio_filepath, "rb") as f:
+                        resp = await client.post(
+                            "https://api.groq.com/openai/v1/audio/transcriptions",
+                            headers={"Authorization": f"Bearer {groq_key}"},
+                            files={"file": ("audio.wav", f, "audio/wav")},
+                            data={"model": "whisper-large-v3-turbo", "language": "en"},
+                        )
+                    if resp.status_code == 200:
+                        transcribed = resp.json().get("text", "")
+                        logger.info(f"🎤 Transcribed: {transcribed}")
+                        return gr.update(value=transcribed), gr.update(visible=False)
+                    else:
+                        logger.warning(f"🎤 Groq Whisper returned {resp.status_code}: {resp.text}")
+            else:
+                logger.warning("🎤 GROQ_API_KEY not set, cannot transcribe voice input.")
+
+        except Exception as e:
+            logger.error(f"🎤 Voice transcription failed: {e}")
+
+        gr.Warning("Voice transcription failed. Please type your task instead.")
+        return gr.update(), gr.update(visible=False)
+
+    def handle_file_upload(file):
+        """Handle uploaded file — store image data for VLM and show preview."""
+        if file is None:
+            return gr.update(visible=False), None
+
+        file_path = file.name if hasattr(file, 'name') else str(file)
+        logger.info(f"📎 File uploaded: {file_path}")
+
+        # Check if it's an image
+        img_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+        if file_path.lower().endswith(img_exts):
+            import base64
+            try:
+                with open(file_path, "rb") as f:
+                    image_b64 = base64.b64encode(f.read()).decode("utf-8")
+                # Determine MIME type
+                ext = os.path.splitext(file_path)[1].lower()
+                mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                            ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+                mime = mime_map.get(ext, "image/png")
+                image_data_url = f"data:{mime};base64,{image_b64}"
+
+                logger.info(f"📎 Image encoded ({len(image_b64)} chars), stored for VLM.")
+                return gr.update(value=file_path, visible=True), image_data_url
+            except Exception as e:
+                logger.error(f"📎 Image encoding failed: {e}")
+                return gr.update(visible=False), None
+        else:
+            # Non-image file: read text content and prepend to task
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read(5000)  # First 5000 chars
+                logger.info(f"📎 Text file read ({len(content)} chars)")
+                gr.Info(f"File loaded: {os.path.basename(file_path)}")
+                return gr.update(visible=False), None
+            except Exception as e:
+                logger.error(f"📎 File read failed: {e}")
+                return gr.update(visible=False), None
+
+    # --- Wrappers ---
     async def submit_wrapper(
             components_dict: Dict[Component, Any],
     ) -> AsyncGenerator[Dict[Component, Any], None]:
@@ -1092,15 +1453,40 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
         update_dict = await handle_clear(webui_manager)
         yield update_dict
 
-    # --- Connect Event Handlers using the Wrappers --
+    # --- Connect Event Handlers ---
+
+    # Submit on button click or Enter key
     run_button.click(
         fn=submit_wrapper, inputs=all_managed_components, outputs=run_tab_outputs, trigger_mode="multiple"
     )
     user_input.submit(
         fn=submit_wrapper, inputs=all_managed_components, outputs=run_tab_outputs
     )
+
+    # Agent control buttons
     stop_button.click(fn=stop_wrapper, inputs=None, outputs=run_tab_outputs)
     pause_resume_button.click(
         fn=pause_resume_wrapper, inputs=None, outputs=run_tab_outputs
     )
     clear_button.click(fn=clear_wrapper, inputs=None, outputs=run_tab_outputs)
+
+    # Mic button: toggle the hidden audio recorder
+    mic_button.click(
+        fn=handle_mic_click,
+        inputs=None,
+        outputs=[voice_input],
+    )
+
+    # Voice STT: when recording is done, transcribe, fill textbox, hide recorder
+    voice_input.change(
+        fn=handle_voice_input,
+        inputs=[voice_input],
+        outputs=[user_input, voice_input],
+    )
+
+    # Vision VLM: on file upload, encode image and show preview
+    multimodal_upload.upload(
+        fn=handle_file_upload,
+        inputs=[multimodal_upload],
+        outputs=[image_preview, image_data_state],
+    )

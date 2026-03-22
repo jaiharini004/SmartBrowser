@@ -275,6 +275,158 @@ def create_ui(theme_name="Default"):
     footer {
         display: none !important;
     }
+
+    /* ============================================
+       EXACT CHATGPT INPUT BAR CLONE
+       ============================================ */
+
+    /* The Main Dark Pill Container */
+    #chatgpt-input-pill {
+        background-color: #2f2f2f !important;
+        border-radius: 32px !important;
+        padding: 8px 12px !important;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        width: 100% !important;
+        gap: 8px !important;
+        border: 1px solid #444 !important;
+        margin-top: 15px !important;
+    }
+
+    /* Strip Gradio's internal block wrappers */
+    #chatgpt-input-pill > div,
+    #chatgpt-input-pill .svelte-116rqyq,
+    #chatgpt-input-pill .block,
+    #chatgpt-input-pill .container,
+    #chatgpt-input-pill .wrap {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+
+    /* The '+' Upload Button */
+    #chat-plus-btn {
+        background: transparent !important;
+        border: none !important;
+        color: #b4b4b4 !important;
+        font-size: 24px !important;
+        font-weight: 300 !important;
+        min-width: 40px !important;
+        max-width: 40px !important;
+        height: 40px !important;
+        border-radius: 50% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        padding: 0 !important;
+        flex-shrink: 0 !important;
+    }
+    #chat-plus-btn:hover {
+        color: #ffffff !important;
+        background-color: #404040 !important;
+    }
+
+    /* The Textbox */
+    #chat-text-box {
+        flex-grow: 1 !important;
+        min-width: 0 !important;
+    }
+    #chat-text-box textarea {
+        background-color: transparent !important;
+        border: none !important;
+        color: #ececec !important;
+        font-size: 16px !important;
+        resize: none !important;
+        padding: 10px 5px !important;
+        line-height: 1.5 !important;
+        box-shadow: none !important;
+    }
+    #chat-text-box textarea:focus {
+        outline: none !important;
+        box-shadow: none !important;
+        border: none !important;
+    }
+    #chat-text-box textarea::placeholder {
+        color: #8e8ea0 !important;
+    }
+
+    /* The Mic Button (simple gr.Button styled like plus button) */
+    #chat-mic-btn {
+        background: transparent !important;
+        border: none !important;
+        color: #b4b4b4 !important;
+        font-size: 20px !important;
+        min-width: 40px !important;
+        max-width: 40px !important;
+        height: 40px !important;
+        border-radius: 50% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        padding: 0 !important;
+        flex-shrink: 0 !important;
+    }
+    #chat-mic-btn:hover {
+        color: #ffffff !important;
+        background-color: #404040 !important;
+    }
+
+    /* Hidden voice recorder (shown when mic is clicked) */
+    #voice-recorder {
+        border-radius: 12px !important;
+        margin-top: 8px !important;
+    }
+
+    /* The White Circular Submit Button */
+    #chat-send-btn {
+        background-color: #ffffff !important;
+        color: #000000 !important;
+        border: none !important;
+        min-width: 35px !important;
+        width: 35px !important;
+        max-width: 35px !important;
+        height: 35px !important;
+        border-radius: 50% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 18px !important;
+        cursor: pointer !important;
+        padding: 0 !important;
+        flex-shrink: 0 !important;
+    }
+    #chat-send-btn:hover {
+        background-color: #e5e5e5 !important;
+    }
+
+    /* Control buttons row below the pill */
+    #agent-control-row {
+        display: flex !important;
+        gap: 8px !important;
+        margin-top: 8px !important;
+        justify-content: center !important;
+    }
+    #agent-control-row button {
+        border-radius: 20px !important;
+        font-size: 13px !important;
+        padding: 6px 16px !important;
+    }
+
+    /* Image preview for uploaded file */
+    #image-preview-box {
+        max-height: 60px !important;
+        margin-top: 4px !important;
+    }
+    #image-preview-box img {
+        max-height: 56px !important;
+        border-radius: 8px !important;
+        border: 1px solid #444 !important;
+    }
     """
 
     # Force dark mode
