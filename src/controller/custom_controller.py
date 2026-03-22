@@ -74,6 +74,9 @@ class CustomController(Controller):
             'Upload file to interactive element with file path ',
         )
         async def upload_file(index: int, path: str, browser: BrowserContext, available_file_paths: list[str]):
+            if not available_file_paths:
+                return ActionResult(error='No uploaded files are available for this task')
+
             if path not in available_file_paths:
                 return ActionResult(error=f'File path {path} is not available')
 

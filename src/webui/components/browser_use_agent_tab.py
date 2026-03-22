@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.browser_use.browser_use_agent import BrowserUseAgent
 from src.browser.custom_browser import CustomBrowser
+from src.browser.profile_utils import resolve_profile_selection
 from src.controller.custom_controller import CustomController
 from src.utils import llm_provider
 from src.utils.memory_manager import MemoryManager
@@ -32,6 +34,84 @@ _SITE_DESCRIPTION_OVERRIDES: Dict[str, str] = {
     "pinterest.com": "Pinterest is a visual discovery platform used to explore and save ideas through image pins, boards, and curated collections.",
     "www.pinterest.com": "Pinterest is a visual discovery platform used to explore and save ideas through image pins, boards, and curated collections.",
 }
+
+
+def _extract_uploaded_file_context(file_path: Optional[str]) -> str:
+    """Extract concise context from a supported uploaded file to ground execution."""
+    if not file_path:
+        return ""
+
+    try:
+        path_obj = Path(file_path)
+        if not path_obj.exists() or not path_obj.is_file():
+            return ""
+
+        suffix = path_obj.suffix.lower()
+        if suffix in {".txt", ".md", ".csv", ".json", ".log"}:
+            content = path_obj.read_text(encoding="utf-8", errors="ignore")
+            excerpt = content[:3000].strip()
+            if excerpt:
+                return f"\n\nUploaded file context ({path_obj.name}):\n{excerpt}"
+
+        if suffix == ".docx":
+            try:
+                import docx
+
+                doc = docx.Document(str(path_obj))
+                text_parts = [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text and paragraph.text.strip()]
+                excerpt = "\n".join(text_parts)[:4000].strip()
+                if excerpt:
+                    return f"\n\nUploaded DOCX context ({path_obj.name}):\n{excerpt}"
+            except Exception as docx_exc:
+                logger.warning(f"Could not parse uploaded DOCX '{file_path}': {docx_exc}")
+
+        if suffix == ".doc":
+            return (
+                f"\n\nUploaded DOC file ({path_obj.name}) is attached. "
+                "Legacy .doc local parsing is limited; use browser upload actions for source-grounded handling."
+            )
+
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+
+                reader = PdfReader(str(path_obj))
+                text_parts = []
+                max_pages = min(len(reader.pages), 12)
+                for page in reader.pages[:max_pages]:
+                    raw_text = (page.extract_text() or "").replace("\u00ad", "")
+                    compact = " ".join(raw_text.split())
+                    if compact:
+                        text_parts.append(compact)
+                excerpt = "\n\n".join(text_parts)[:4500].strip()
+                if excerpt:
+                    return f"\n\nUploaded PDF context ({path_obj.name}):\n{excerpt}"
+                return (
+                    f"\n\nUploaded file ({path_obj.name}) is a PDF. "
+                    "If needed, use upload actions to submit it to websites and rely on page rendering for details."
+                )
+            except Exception as pdf_exc:
+                logger.warning(f"Could not parse uploaded PDF '{file_path}': {pdf_exc}")
+                return (
+                    f"\n\nUploaded file ({path_obj.name}) is a PDF. "
+                    "Local extraction failed; continue using browser actions and available file upload tools."
+                )
+    except Exception as exc:
+        logger.warning(f"Failed to extract uploaded file context: {exc}")
+
+    return ""
+
+
+def _build_task_with_guardrails(task: str, uploaded_context: str) -> str:
+    guidance = (
+        "Execution policy:\n"
+        "1. Plan briefly before acting: identify the target site and the minimal steps needed.\n"
+        "2. If a URL is uncertain, do not invent domains. Use a search engine first and open a verified result.\n"
+        "3. Prefer official domains and stable sources.\n"
+        "4. Avoid repeating the same failed URL more than once; switch strategy to search and verify.\n"
+        "5. Keep actions token-efficient and finish the task with a clear final result."
+    )
+    return f"{task}\n\n{guidance}{uploaded_context}"
 
 
 # --- Helper Functions --- (Defined at module level)
@@ -416,6 +496,11 @@ async def run_agent_task(
 
     # --- 1. Get Task and Initial UI Update ---
     task = components.get(user_input_comp, "").strip()
+    upload_state_comp = webui_manager.get_component_by_id("browser_use_agent.uploaded_file_path_state")
+    uploaded_file_path = components.get(upload_state_comp)
+    uploaded_context = _extract_uploaded_file_context(uploaded_file_path)
+    task_for_agent = _build_task_with_guardrails(task, uploaded_context)
+
     if not task:
         gr.Warning("Please enter a task.")
         yield {run_button_comp: gr.update(interactive=True)}
@@ -493,6 +578,7 @@ async def run_agent_task(
 
     # Planner LLM Settings (Optional)
     planner_llm_provider_name = get_setting("planner_llm_provider") or None
+    force_task_planning = bool(get_setting("force_task_planning", True))
     planner_llm = None
     planner_use_vision = False
     if planner_llm_provider_name:
@@ -519,6 +605,7 @@ async def run_agent_task(
 
     browser_binary_path = get_browser_setting("browser_binary_path") or None
     browser_user_data_dir = get_browser_setting("browser_user_data_dir") or None
+    browser_profile = get_browser_setting("browser_profile") or "Custom (manual path)"
     use_own_browser = get_browser_setting(
         "use_own_browser", False
     )  # Logic handled by CDP/WSS presence
@@ -535,6 +622,15 @@ async def run_agent_task(
         "save_agent_history_path", "./tmp/agent_history"
     )
     save_download_path = get_browser_setting("save_download_path", "./tmp/downloads")
+
+    resolved_profile = resolve_profile_selection(
+        profile_label=browser_profile,
+        manual_user_data_dir=browser_user_data_dir,
+        manual_binary_path=browser_binary_path,
+    )
+    browser_user_data_dir = resolved_profile["user_data_dir"]
+    browser_profile_directory = resolved_profile.get("profile_directory")
+    browser_binary_path = resolved_profile["binary_path"]
 
     stream_vw = 70
     stream_vh = int(70 * window_h // window_w)
@@ -568,6 +664,11 @@ async def run_agent_task(
         }
         return
 
+    if force_task_planning and planner_llm is None:
+        planner_llm = main_llm
+        planner_use_vision = False
+        logger.info("Planner fallback enabled: using main LLM as planner.")
+
     # Pass the webui_manager instance to the callback when wrapping it
     async def ask_callback_wrapper(
             query: str, browser_context: BrowserContext
@@ -600,12 +701,14 @@ async def run_agent_task(
             logger.info("Launching new browser instance.")
             extra_args = []
             if use_own_browser:
-                browser_binary_path = os.getenv("BROWSER_PATH", None) or browser_binary_path
+                browser_binary_path = browser_binary_path or os.getenv("BROWSER_PATH", None)
                 if browser_binary_path == "":
                     browser_binary_path = None
                 browser_user_data = browser_user_data_dir or os.getenv("BROWSER_USER_DATA", None)
                 if browser_user_data:
                     extra_args += [f"--user-data-dir={browser_user_data}"]
+                if browser_profile_directory:
+                    extra_args += [f"--profile-directory={browser_profile_directory}"]
             else:
                 browser_binary_path = None
 
@@ -642,6 +745,16 @@ async def run_agent_task(
                 await webui_manager.bu_browser.new_context(config=context_config)
             )
 
+            # Own-profile launches often start on a blank/new-tab page. Open a practical default entry page.
+            if use_own_browser:
+                try:
+                    page = await webui_manager.bu_browser_context.get_current_page()
+                    current_url = (page.url or "").strip().lower()
+                    if current_url in {"", "about:blank", "chrome://newtab/", "edge://newtab/"}:
+                        await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
+                except Exception as startup_err:
+                    logger.info(f"Startup page warmup skipped: {startup_err}")
+
         # --- 5. Initialize or Update Agent ---
         webui_manager.bu_agent_task_id = str(uuid.uuid4())  # New ID for this task run
         os.makedirs(
@@ -677,7 +790,7 @@ async def run_agent_task(
                     "Browser or Context not initialized, cannot create agent."
                 )
             webui_manager.bu_agent = BrowserUseAgent(
-                task=task,
+                task=task_for_agent,
                 llm=main_llm,
                 browser=webui_manager.bu_browser,
                 browser_context=webui_manager.bu_browser_context,
@@ -699,7 +812,7 @@ async def run_agent_task(
             webui_manager.bu_agent.settings.generate_gif = gif_path
         else:
             webui_manager.bu_agent.state.agent_id = webui_manager.bu_agent_task_id
-            webui_manager.bu_agent.add_new_task(task)
+            webui_manager.bu_agent.add_new_task(task_for_agent)
             webui_manager.bu_agent.settings.generate_gif = gif_path
             webui_manager.bu_agent.browser = webui_manager.bu_browser
             webui_manager.bu_agent.browser_context = webui_manager.bu_browser_context
@@ -850,117 +963,7 @@ async def run_agent_task(
             elif agent_task.exception():  # Check if task finished with exception
                 agent_task.result()  # Raise the exception to be caught below
             logger.info("Agent task completed processing.")
-
-            # --- Generate Site/Topic Description ---
-            # After the agent finishes, scrape the current page and ask the LLM
-            # to generate a description of the website/topic the user searched for.
-            try:
-                if webui_manager.bu_browser_context and main_llm:
-                    logger.info("📋 Attempting to generate site/topic description...")
-
-                    # Get the current page the agent was working on
-                    current_page = None
-                    try:
-                        current_page = await webui_manager.bu_browser_context.get_current_page()
-                    except Exception as page_err:
-                        logger.warning(f"📋 Could not get current page: {page_err}")
-
-                    if current_page and not current_page.is_closed():
-                        page_url = current_page.url or ""
-                        logger.info(f"📋 Current page URL: {page_url}")
-
-                        try:
-                            page_title = await current_page.title()
-                        except Exception:
-                            page_title = ""
-
-                        # Skip description for blank/internal pages
-                        if page_url and not page_url.startswith(("about:", "chrome://", "chrome-extension://")):
-                            # Scrape the visible content from the page
-                            page_content = ""
-                            try:
-                                await current_page.wait_for_load_state("domcontentloaded", timeout=5000)
-                                page_content = await current_page.evaluate("""
-                                    () => {
-                                        const remove = document.querySelectorAll(
-                                            'script, style, nav, footer, aside, .sidebar, .menu, .ad, .cookie-banner, iframe'
-                                        );
-                                        remove.forEach(el => el.remove());
-                                        const main = document.querySelector(
-                                            'main, article, .content, #content, .post-content, [role="main"]'
-                                        );
-                                        const target = main || document.body;
-                                        let text = target.innerText || '';
-                                        text = text.replace(/\\n{3,}/g, '\\n\\n').trim();
-                                        return text.substring(0, 3000);
-                                    }
-                                """)
-                                logger.info(f"📋 Scraped {len(page_content)} chars from page")
-                            except Exception as scrape_err:
-                                logger.warning(f"📋 Page scrape failed: {scrape_err}")
-                                page_content = ""
-
-                            if page_title or page_content:
-                                from langchain_core.messages import (
-                                    HumanMessage as DescHumanMessage,
-                                    SystemMessage as DescSystemMessage,
-                                )
-
-                                desc_system = (
-                                    "You are a knowledgeable assistant. The user browsed a website "
-                                    "using the SmartBrowser agent. Based on the page title, URL, "
-                                    "and page content provided, write a clear and concise description "
-                                    "of this website/topic.\n\n"
-                                    "RULES:\n"
-                                    "1. Start with a one-line bold summary of what the site/topic is\n"
-                                    "2. Include 3-5 key points as bullet points\n"
-                                    "3. Mention what the site is used for or known for\n"
-                                    "4. Keep it under 150 words\n"
-                                    "5. Use Markdown formatting\n"
-                                    "6. Do NOT include the URL in the description"
-                                )
-
-                                desc_prompt = (
-                                    f"Page Title: {page_title}\n"
-                                    f"URL: {page_url}\n\n"
-                                    f"Page Content (excerpt):\n{page_content[:2000]}"
-                                )
-
-                                # Wait before LLM call if using rate-limited providers
-                                if llm_provider_name in ("groq", "openrouter", "grok"):
-                                    logger.info("📋 Waiting 10s for rate limit cooldown before description...")
-                                    await asyncio.sleep(10)
-
-                                try:
-                                    desc_response = await main_llm.ainvoke([
-                                        DescSystemMessage(content=desc_system),
-                                        DescHumanMessage(content=desc_prompt),
-                                    ])
-                                    description_text = desc_response.content.strip()
-
-                                    if description_text:
-                                        desc_message = (
-                                            f"📋 **Site Description**\n\n"
-                                            f"{description_text}"
-                                        )
-                                        webui_manager.bu_chat_history.append(
-                                            {"role": "assistant", "content": desc_message}
-                                        )
-                                        logger.info("📋 Site description generated successfully.")
-                                    else:
-                                        logger.warning("📋 LLM returned empty description.")
-                                except Exception as llm_err:
-                                    logger.warning(f"📋 LLM description generation failed: {llm_err}")
-                            else:
-                                logger.info("📋 No page title or content available, skipping description.")
-                        else:
-                            logger.info(f"📋 Skipping description for internal page: {page_url}")
-                    else:
-                        logger.info("📋 No active page available, skipping description.")
-                else:
-                    logger.info("📋 Browser context or LLM not available, skipping description.")
-            except Exception as desc_err:
-                logger.warning(f"📋 Description generation error: {desc_err}")
+            logger.info("Skipping extra post-task LLM description generation to preserve token budget.")
 
             logger.info(f"Explicitly saving agent history to: {history_file}")
             webui_manager.bu_agent.save_history(history_file)
@@ -1173,7 +1176,8 @@ async def handle_clear(webui_manager: WebuiManager):
     task = webui_manager.bu_current_task
     if task and not task.done():
         logger.info("Clearing requires stopping the current task.")
-        webui_manager.bu_agent.stop()
+        if webui_manager.bu_agent:
+            webui_manager.bu_agent.stop()
         task.cancel()
         try:
             await asyncio.wait_for(task, timeout=2.0)  # Wait briefly
@@ -1209,6 +1213,17 @@ async def handle_clear(webui_manager: WebuiManager):
         ): gr.update(value=None),
         webui_manager.get_component_by_id("browser_use_agent.recording_gif"): gr.update(
             value=None
+        ),
+        webui_manager.get_component_by_id("browser_use_agent.image_preview"): gr.update(
+            value=None, visible=False
+        ),
+        webui_manager.get_component_by_id("browser_use_agent.uploaded_file_path_state"): None,
+        webui_manager.get_component_by_id("browser_use_agent.image_data_state"): None,
+        webui_manager.get_component_by_id("browser_use_agent.uploaded_file_row"): gr.update(
+            visible=False
+        ),
+        webui_manager.get_component_by_id("browser_use_agent.uploaded_file_label"): gr.update(
+            value=""
         ),
         webui_manager.get_component_by_id("browser_use_agent.browser_view"): gr.update(
             value="<div style='...'>Browser Cleared</div>"
@@ -1260,13 +1275,22 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
 
         # Hidden state to carry image data for VLM
         image_data_state = gr.State(value=None)
+        uploaded_file_path_state = gr.State(value=None)
+
+        with gr.Row(visible=False) as uploaded_file_row:
+            uploaded_file_label = gr.Textbox(
+                label="Attached file",
+                value="",
+                interactive=False,
+            )
+            remove_uploaded_file_btn = gr.Button("Remove file", variant="secondary")
 
         # ======== ChatGPT-Style Input Pill ========
         with gr.Row(elem_id="chatgpt-input-pill"):
             # The '+' Upload Button (opens native file picker)
             multimodal_upload = gr.UploadButton(
                 "＋",
-                file_types=["image", ".pdf", ".txt"],
+                file_types=["image", ".pdf", ".txt", ".md", ".doc", ".docx"],
                 file_count="single",
                 elem_id="chat-plus-btn",
             )
@@ -1341,16 +1365,20 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
             voice_input=voice_input,
             image_preview=image_preview,
             image_data_state=image_data_state,
+            uploaded_file_path_state=uploaded_file_path_state,
+            uploaded_file_row=uploaded_file_row,
+            uploaded_file_label=uploaded_file_label,
+            remove_uploaded_file_btn=remove_uploaded_file_btn,
         )
     )
     webui_manager.add_components(
         "browser_use_agent", tab_components
     )  # Use "browser_use_agent" as tab_name prefix
 
-    all_managed_components = set(
-        webui_manager.get_components()
-    )  # Get all components known to manager
-    run_tab_outputs = list(tab_components.values())
+    all_managed_components = [
+        comp for comp in webui_manager.get_components() if comp.__class__.__name__ != "Row"
+    ]
+    run_tab_outputs = [comp for comp in tab_components.values() if comp.__class__.__name__ != "Row"]
 
     # --- Multimodal Handlers ---
 
@@ -1394,10 +1422,17 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
     def handle_file_upload(file):
         """Handle uploaded file — store image data for VLM and show preview."""
         if file is None:
-            return gr.update(visible=False), None
+            return (
+                gr.update(visible=False),
+                None,
+                None,
+                gr.update(visible=False),
+                gr.update(value=""),
+            )
 
         file_path = file.name if hasattr(file, 'name') else str(file)
         logger.info(f"📎 File uploaded: {file_path}")
+        file_name = os.path.basename(file_path)
 
         # Check if it's an image
         img_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
@@ -1414,27 +1449,74 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
                 image_data_url = f"data:{mime};base64,{image_b64}"
 
                 logger.info(f"📎 Image encoded ({len(image_b64)} chars), stored for VLM.")
-                return gr.update(value=file_path, visible=True), image_data_url
+                return (
+                    gr.update(value=file_path, visible=True),
+                    image_data_url,
+                    file_path,
+                    gr.update(visible=True),
+                    gr.update(value=file_name),
+                )
             except Exception as e:
                 logger.error(f"📎 Image encoding failed: {e}")
-                return gr.update(visible=False), None
+                return (
+                    gr.update(visible=False),
+                    None,
+                    file_path,
+                    gr.update(visible=True),
+                    gr.update(value=file_name),
+                )
         else:
+            binary_supported = {".pdf", ".docx"}
+            if os.path.splitext(file_path)[1].lower() in binary_supported:
+                gr.Info(f"File loaded: {os.path.basename(file_path)}")
+                return (
+                    gr.update(visible=False),
+                    None,
+                    file_path,
+                    gr.update(visible=True),
+                    gr.update(value=file_name),
+                )
+
             # Non-image file: read text content and prepend to task
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read(5000)  # First 5000 chars
                 logger.info(f"📎 Text file read ({len(content)} chars)")
                 gr.Info(f"File loaded: {os.path.basename(file_path)}")
-                return gr.update(visible=False), None
+                return (
+                    gr.update(visible=False),
+                    None,
+                    file_path,
+                    gr.update(visible=True),
+                    gr.update(value=file_name),
+                )
             except Exception as e:
                 logger.error(f"📎 File read failed: {e}")
-                return gr.update(visible=False), None
+                return (
+                    gr.update(visible=False),
+                    None,
+                    file_path,
+                    gr.update(visible=True),
+                    gr.update(value=file_name),
+                )
+
+    def clear_uploaded_file():
+        return (
+            gr.update(visible=False),
+            None,
+            None,
+            gr.update(visible=False),
+            gr.update(value=""),
+        )
 
     # --- Wrappers ---
     async def submit_wrapper(
-            components_dict: Dict[Component, Any],
+            *component_values,
     ) -> AsyncGenerator[Dict[Component, Any], None]:
         """Wrapper for handle_submit that yields its results."""
+        components_dict: Dict[Component, Any] = {
+            comp: value for comp, value in zip(all_managed_components, component_values)
+        }
         async for update in handle_submit(webui_manager, components_dict):
             yield update
 
@@ -1488,5 +1570,11 @@ def create_browser_use_agent_tab(webui_manager: WebuiManager):
     multimodal_upload.upload(
         fn=handle_file_upload,
         inputs=[multimodal_upload],
-        outputs=[image_preview, image_data_state],
+        outputs=[image_preview, image_data_state, uploaded_file_path_state, uploaded_file_row, uploaded_file_label],
+    )
+
+    remove_uploaded_file_btn.click(
+        fn=clear_uploaded_file,
+        inputs=None,
+        outputs=[image_preview, image_data_state, uploaded_file_path_state, uploaded_file_row, uploaded_file_label],
     )

@@ -95,10 +95,16 @@ def create_ui(theme_name="Default"):
         font-size: 2rem !important;
         font-weight: 700 !important;
         letter-spacing: -0.5px;
+        color: var(--sb-text-primary) !important;
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
         background: linear-gradient(135deg, #e8e8f0 0%, #b8b8d0 50%, var(--sb-accent) 100%);
         -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
         margin-bottom: 4px !important;
+    }
+    @supports (-webkit-background-clip: text) {
+        .header-text h1 {
+            -webkit-text-fill-color: transparent;
+        }
     }
     .header-text h3 {
         font-weight: 400 !important;

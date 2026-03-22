@@ -11,6 +11,7 @@ import asyncio
 import json
 from src.agent.deep_research.deep_research_agent import DeepResearchAgent
 from src.utils import llm_provider
+from src.browser.profile_utils import resolve_profile_selection
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +145,24 @@ async def run_deep_research(webui_manager: WebuiManager, components: Dict[Compon
         browser_config_dict = {
             "headless": get_setting("browser_settings", "headless", False),
             "disable_security": get_setting("browser_settings", "disable_security", False),
+            "use_own_browser": get_setting("browser_settings", "use_own_browser", False),
             "browser_binary_path": get_setting("browser_settings", "browser_binary_path"),
             "user_data_dir": get_setting("browser_settings", "browser_user_data_dir"),
+            "wss_url": get_setting("browser_settings", "wss_url"),
+            "cdp_url": get_setting("browser_settings", "cdp_url"),
             "window_width": int(get_setting("browser_settings", "window_w", 1280)),
             "window_height": int(get_setting("browser_settings", "window_h", 1100)),
             # Add other relevant fields if DeepResearchAgent accepts them
         }
+
+        resolved_profile = resolve_profile_selection(
+            profile_label=get_setting("browser_settings", "browser_profile", "Custom (manual path)"),
+            manual_user_data_dir=browser_config_dict.get("user_data_dir"),
+            manual_binary_path=browser_config_dict.get("browser_binary_path"),
+        )
+        browser_config_dict["user_data_dir"] = resolved_profile["user_data_dir"]
+        browser_config_dict["browser_binary_path"] = resolved_profile["binary_path"]
+        browser_config_dict["profile_directory"] = resolved_profile.get("profile_directory")
 
         # --- 4. Initialize or Get Agent ---
         if not webui_manager.dr_agent:

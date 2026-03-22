@@ -71,6 +71,7 @@ async def run_single_browser_task(
     window_w = browser_config.get("window_width", 1280)
     window_h = browser_config.get("window_height", 1100)
     browser_user_data_dir = browser_config.get("user_data_dir", None)
+    browser_profile_directory = browser_config.get("profile_directory", None)
     use_own_browser = browser_config.get("use_own_browser", False)
     browser_binary_path = browser_config.get("browser_binary_path", None)
     wss_url = browser_config.get("wss_url", None)
@@ -83,12 +84,14 @@ async def run_single_browser_task(
         logger.info(f"Starting browser task for query: {task_query}")
         extra_args = []
         if use_own_browser:
-            browser_binary_path = os.getenv("BROWSER_PATH", None) or browser_binary_path
+            browser_binary_path = browser_binary_path or os.getenv("BROWSER_PATH", None)
             if browser_binary_path == "":
                 browser_binary_path = None
             browser_user_data = browser_user_data_dir or os.getenv("BROWSER_USER_DATA", None)
             if browser_user_data:
                 extra_args += [f"--user-data-dir={browser_user_data}"]
+            if browser_profile_directory:
+                extra_args += [f"--profile-directory={browser_profile_directory}"]
         else:
             browser_binary_path = None
 
@@ -127,6 +130,8 @@ async def run_single_browser_task(
         2. The title of the source page or document.
         3. The URL of the source.
         Focus on accuracy and relevance. Avoid irrelevant details.
+        If a URL is uncertain, do not invent domains. Use search and open verified results.
+        Avoid retrying the same failing URL repeatedly.
         PDF cannot directly extract _content, please try to download first, then using read_file, if you can't save or read, please try other methods.
         """
 
@@ -213,8 +218,21 @@ async def _run_browser_search_tool(
     Handles concurrency and stop signals.
     """
 
+    # Normalize + deduplicate queries to reduce wasted repeated runs.
+    cleaned_queries: List[str] = []
+    seen = set()
+    for raw_query in queries:
+        query = (raw_query or "").strip()
+        if not query:
+            continue
+        lowered = query.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned_queries.append(query)
+
     # Limit queries just in case LLM ignores the description
-    queries = queries[:max_parallel_browsers]
+    queries = cleaned_queries[:max_parallel_browsers]
     logger.info(
         f"[Browser Tool {task_id}] Running search for {len(queries)} queries: {queries}"
     )

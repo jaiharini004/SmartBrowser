@@ -8,3 +8,5 @@ langchain-ibm==0.3.10
 langchain_mcp_adapters==0.0.9
 langgraph==0.3.34
 langchain-community
+pypdf>=4.2.0
+python-docx>=1.1.2

@@ -67,6 +67,8 @@ class BrowserUseAgent(Agent):
 
         try:
             self._log_agent_run()
+            last_failed_url = None
+            repeated_failures_same_url = 0
 
             # Execute initial actions if provided
             if self.initial_actions:
@@ -85,6 +87,40 @@ class BrowserUseAgent(Agent):
                     backoff_time = min(10 * self.state.consecutive_failures, 30)
                     logger.info(f'⏳ Rate limit backoff: waiting {backoff_time}s before retry (failure {self.state.consecutive_failures}/{self.settings.max_failures})')
                     await asyncio.sleep(backoff_time)
+
+                    # Fail fast if we keep failing on the same page URL.
+                    try:
+                        failed_page = await self.browser_context.get_current_page()
+                        failed_url = (failed_page.url or '').strip()
+                        if failed_url and failed_url == last_failed_url:
+                            repeated_failures_same_url += 1
+                        else:
+                            last_failed_url = failed_url
+                            repeated_failures_same_url = 1 if failed_url else 0
+
+                        if failed_url and repeated_failures_same_url >= 2 and self.state.consecutive_failures >= 2:
+                            error_message = (
+                                f"Stopping early after repeated failures on {failed_url}. "
+                                "Switch to verified search flow to avoid hallucinated URL retries."
+                            )
+                            self.state.history.history.append(
+                                AgentHistory(
+                                    model_output=None,
+                                    result=[ActionResult(error=error_message, include_in_memory=True)],
+                                    state=BrowserStateHistory(
+                                        url=failed_url,
+                                        title='',
+                                        tabs=[],
+                                        interacted_element=[],
+                                        screenshot=None,
+                                    ),
+                                    metadata=None,
+                                )
+                            )
+                            logger.warning(error_message)
+                            break
+                    except Exception as url_check_err:
+                        logger.debug(f'URL failure dedupe check skipped: {url_check_err}')
 
                 # Check if we should stop due to too many failures
                 if self.state.consecutive_failures >= self.settings.max_failures:

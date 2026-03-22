@@ -202,6 +202,12 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
             precision=0,
             interactive=True
         )
+        force_task_planning = gr.Checkbox(
+            label="Force Task Planning",
+            value=True,
+            info="Always use a planner model before browser execution (falls back to main LLM if planner is empty).",
+            interactive=True,
+        )
         tool_calling_method = gr.Dropdown(
             label="Tool Calling Method",
             value="auto",
@@ -230,6 +236,7 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
         max_steps=max_steps,
         max_actions=max_actions,
         max_input_tokens=max_input_tokens,
+        force_task_planning=force_task_planning,
         tool_calling_method=tool_calling_method,
         mcp_json_file=mcp_json_file,
         mcp_server_config=mcp_server_config,

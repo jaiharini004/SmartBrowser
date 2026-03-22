@@ -6,6 +6,7 @@ from gradio.components import Component
 
 from src.webui.webui_manager import WebuiManager
 from src.utils import config
+from src.browser.profile_utils import discover_browser_profiles, resolve_profile_selection
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,19 @@ def create_browser_settings_tab(webui_manager: WebuiManager):
     """
     input_components = set(webui_manager.get_components())
     tab_components = {}
+    discovered_profiles = discover_browser_profiles()
+    profile_choices = ["Custom (manual path)"] + [preset["label"] for preset in discovered_profiles]
+
+    with gr.Group():
+        with gr.Row():
+            browser_profile = gr.Dropdown(
+                label="Default Browser Profile",
+                choices=profile_choices,
+                value=profile_choices[0],
+                info="Choose a detected Chrome/Edge profile or keep custom manual paths.",
+                interactive=True,
+            )
+            refresh_profiles_btn = gr.Button("Refresh Profiles", variant="secondary")
 
     with gr.Group():
         with gr.Row():
@@ -133,6 +147,7 @@ def create_browser_settings_tab(webui_manager: WebuiManager):
             )
     tab_components.update(
         dict(
+            browser_profile=browser_profile,
             browser_binary_path=browser_binary_path,
             browser_user_data_dir=browser_user_data_dir,
             use_own_browser=use_own_browser,
@@ -159,3 +174,32 @@ def create_browser_settings_tab(webui_manager: WebuiManager):
     keep_browser_open.change(close_wrapper)
     disable_security.change(close_wrapper)
     use_own_browser.change(close_wrapper)
+
+    def refresh_profile_choices():
+        refreshed = discover_browser_profiles()
+        choices = ["Custom (manual path)"] + [item["label"] for item in refreshed]
+        return gr.update(choices=choices, value=choices[0])
+
+    def apply_profile(profile_label, manual_user_data_dir, manual_binary_path):
+        resolved = resolve_profile_selection(
+            profile_label=profile_label,
+            manual_user_data_dir=manual_user_data_dir,
+            manual_binary_path=manual_binary_path,
+        )
+        own_browser_update = gr.update(value=True) if profile_label and profile_label != "Custom (manual path)" else gr.update()
+        return (
+            gr.update(value=resolved["user_data_dir"] or ""),
+            gr.update(value=resolved["binary_path"] or ""),
+            own_browser_update,
+        )
+
+    browser_profile.change(
+        fn=apply_profile,
+        inputs=[browser_profile, browser_user_data_dir, browser_binary_path],
+        outputs=[browser_user_data_dir, browser_binary_path, use_own_browser],
+    )
+    refresh_profiles_btn.click(
+        fn=refresh_profile_choices,
+        inputs=None,
+        outputs=[browser_profile],
+    )
