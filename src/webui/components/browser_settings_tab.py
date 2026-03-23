@@ -174,6 +174,11 @@ def create_browser_settings_tab(webui_manager: WebuiManager):
     keep_browser_open.change(close_wrapper)
     disable_security.change(close_wrapper)
     use_own_browser.change(close_wrapper)
+    browser_profile.change(close_wrapper)
+    browser_binary_path.change(close_wrapper)
+    browser_user_data_dir.change(close_wrapper)
+    cdp_url.change(close_wrapper)
+    wss_url.change(close_wrapper)
 
     def refresh_profile_choices():
         refreshed = discover_browser_profiles()

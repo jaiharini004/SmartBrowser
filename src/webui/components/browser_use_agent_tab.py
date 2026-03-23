@@ -535,9 +535,6 @@ async def run_agent_task(
 
     override_system_prompt = get_setting("override_system_prompt") or None
     extend_system_prompt = get_setting("extend_system_prompt") or ""
-    if memory_context:
-        extend_system_prompt += "\n" + memory_context
-    extend_system_prompt = extend_system_prompt if extend_system_prompt else None
     llm_provider_name = get_setting(
         "llm_provider", None
     )  # Default to None if not found
@@ -549,6 +546,18 @@ async def run_agent_task(
     _NO_VISION_PROVIDERS = {"groq", "openrouter", "grok"}
     # Providers that use ChatOpenAI wrapper (mem0 defaults to OpenAI embeddings which requires OPENAI_API_KEY)
     _NO_MEMORY_PROVIDERS = {"groq", "openrouter", "grok"}
+    _LOW_TPM_PROVIDERS = {"groq"}
+    _PROVIDER_MAX_INPUT_TOKEN_CAP = {
+        "groq": 3500,
+    }
+
+    # Avoid injecting large rolling memory context for strict low-TPM providers.
+    if memory_context:
+        if llm_provider_name in _LOW_TPM_PROVIDERS:
+            logger.info(f"Skipping rolling memory prompt injection for {llm_provider_name} to avoid oversized requests.")
+        else:
+            extend_system_prompt += "\n" + memory_context
+    extend_system_prompt = extend_system_prompt if extend_system_prompt else None
 
     # Auto-disable vision for providers that don't support multimodal messages
     if llm_provider_name in _NO_VISION_PROVIDERS and use_vision:
@@ -563,7 +572,7 @@ async def run_agent_task(
     llm_api_key = get_setting("llm_api_key") or None
     max_steps = get_setting("max_steps", 100)
     max_actions = get_setting("max_actions", 10)
-    max_input_tokens = get_setting("max_input_tokens", 128000)
+    max_input_tokens = int(get_setting("max_input_tokens", 128000))
     tool_calling_str = get_setting("tool_calling_method", "auto")
     tool_calling_method = tool_calling_str if tool_calling_str != "None" else None
     mcp_server_config_comp = webui_manager.id_to_component.get(
@@ -579,6 +588,26 @@ async def run_agent_task(
     # Planner LLM Settings (Optional)
     planner_llm_provider_name = get_setting("planner_llm_provider") or None
     force_task_planning = bool(get_setting("force_task_planning", True))
+    planner_interval = 1
+
+    if llm_provider_name in _LOW_TPM_PROVIDERS:
+        provider_cap = _PROVIDER_MAX_INPUT_TOKEN_CAP[llm_provider_name]
+        if max_input_tokens > provider_cap:
+            logger.warning(
+                f"Capping max_input_tokens for {llm_provider_name}: {max_input_tokens} -> {provider_cap} "
+                "to stay under provider TPM limits."
+            )
+            max_input_tokens = provider_cap
+
+        # Running planner each step with full history is expensive for strict TPM providers.
+        planner_interval = 4
+        if force_task_planning and not planner_llm_provider_name:
+            force_task_planning = False
+            logger.warning(
+                f"Auto-disabling planner fallback for {llm_provider_name} because it can exceed TPM limits. "
+                "Set Planner LLM explicitly to re-enable planning."
+            )
+
     planner_llm = None
     planner_use_vision = False
     if planner_llm_provider_name:
@@ -631,6 +660,14 @@ async def run_agent_task(
     browser_user_data_dir = resolved_profile["user_data_dir"]
     browser_profile_directory = resolved_profile.get("profile_directory")
     browser_binary_path = resolved_profile["binary_path"]
+
+    # In own-browser mode we launch a local browser/profile; stale remote endpoints should not override that path.
+    if use_own_browser and (cdp_url or wss_url):
+        logger.warning(
+            "Use Own Browser is enabled; ignoring configured CDP/WSS endpoint to launch local browser profile."
+        )
+        cdp_url = None
+        wss_url = None
 
     stream_vw = 70
     stream_vh = int(70 * window_h // window_w)
@@ -745,10 +782,22 @@ async def run_agent_task(
                 await webui_manager.bu_browser.new_context(config=context_config)
             )
 
+            # Force browser bootstrap now so profile/CDP errors fail during setup, not inside the task loop.
+            try:
+                startup_page = await asyncio.wait_for(
+                    webui_manager.bu_browser_context.get_current_page(),
+                    timeout=12,
+                )
+            except Exception as startup_bootstrap_err:
+                raise RuntimeError(
+                    "Browser startup failed before task execution. "
+                    "If you are using your own profile, close all Edge/Chrome background processes and retry."
+                ) from startup_bootstrap_err
+
             # Own-profile launches often start on a blank/new-tab page. Open a practical default entry page.
             if use_own_browser:
                 try:
-                    page = await webui_manager.bu_browser_context.get_current_page()
+                    page = startup_page
                     current_url = (page.url or "").strip().lower()
                     if current_url in {"", "about:blank", "chrome://newtab/", "edge://newtab/"}:
                         await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
@@ -804,6 +853,7 @@ async def run_agent_task(
                 max_actions_per_step=max_actions,
                 tool_calling_method=tool_calling_method,
                 planner_llm=planner_llm,
+                planner_interval=planner_interval,
                 use_vision_for_planner=planner_use_vision if planner_llm else False,
                 enable_memory=llm_provider_name not in _NO_MEMORY_PROVIDERS,
                 source="webui",

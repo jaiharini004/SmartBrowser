@@ -78,6 +78,13 @@ async def run_single_browser_task(
     cdp_url = browser_config.get("cdp_url", None)
     disable_security = browser_config.get("disable_security", False)
 
+    if use_own_browser and (cdp_url or wss_url):
+        logger.warning(
+            "Use Own Browser is enabled for deep research; ignoring configured CDP/WSS endpoint to launch local profile."
+        )
+        cdp_url = None
+        wss_url = None
+
     bu_browser = None
     bu_browser_context = None
     try:
