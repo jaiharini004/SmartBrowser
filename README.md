@@ -147,3 +147,9 @@ SmartBrowser/
 ##  License
 
 This project is for personal and educational use.
+
+---
+
+##  Project By 
+[JAI HARINI K S](https://github.com/jaiharini004)
+[Priya Darshini .R](https://github.com/priyadarshini1905)
